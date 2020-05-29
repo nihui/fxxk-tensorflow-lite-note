@@ -216,7 +216,7 @@ bazel build --config opt //tensorflow/lite/python/interpreter_wrapper:tensorflow
 
 namespace tflite {
 namespace ops {
-namespace custom {    #### 注意1.x版本官方是放到了builtin命名空间 2.1需要放在custom命名空间
+namespace custom {    // 注意1.x版本官方是放到了builtin命名空间 2.1需要放在custom命名空间
 namespace zerof {
 TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {}                             
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {}
