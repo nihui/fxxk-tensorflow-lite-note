@@ -81,7 +81,7 @@ sudo update-alternatives --config gcc  # 控制默认gcc版本 g++同上
 sh文件装好 
 
 .zshrc  或者.bashrc注册  source刷新
- 注意：
+ 注意添加sock5的支持 与本机代理同步：
 
 ```shell
 unset all_proxy && unset ALL_PROXY
@@ -104,6 +104,8 @@ pip install keras_applications==1.0.4 --no-deps
 pip install keras_preprocessing==1.0.2 --no-deps
 pip install h5py==2.8.0
 ```
+
+注意：尽量不要再base环境安装tensorflow和jupyter notebook之类的包，防止虚拟环境没有安装而去上级base环境找到直接使用引起版本错误
 
 # 4. TensorFlow安装和构建
 
@@ -371,6 +373,15 @@ std::unique_ptr<OpResolver> CreateOpResolver() {  // NOLINT
 frozen固化模型是为了移动端部署实现的 但是lite也实现了该功能 
 
 推荐方法简单处理后 将模型保存为 saved_model 并转化为lite模型
+
+在tf2.x环境直接支持tf1.x模型运行：
+
+```python
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+```
+
+
 
 ## 5.1 处理模型 保存为saved_model
 
