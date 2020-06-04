@@ -255,7 +255,7 @@ cc_library(
 
 ##### c. 添加声明
 
-在 builtin_opkernels.h   custom_ops_register.h 添加
+在 (builtin_opkernels.h 后经验证不用)   custom_ops_register.h 添加
 
 ```c++
 TfLiteRegistration* Register_ZEROS();
@@ -271,9 +271,28 @@ TfLiteRegistration* Register_ZEROF();
 }
 
 BuiltinOpResolver::BuiltinOpResolver(){
-AddCustom("Zerof", tflite::ops::custom::Register_ZEROF());
+AddCustom("Zerof", tflite::ops::custom::Register_ZEROF());  
+    // Zerof 这里我们需严格使用大驼峰命名 例如: ExtractImagesPatches
+    // 在编译为解释器之后 算子名将被自动转化为下划线所谓snack格式 例如: extract_images_patches
+    // 另注: Register_ZEROF这个名称没有上面两条的限制 随便定义 统一即可
 }
 ```
+
+##### e. polish编译验证流程
+
+​	使用bazel build一次之后，tensorflow的源代码文件夹下已经包含了解释器的so文件
+
+​	跳转到conda虚拟环境的tensorflow代码位置：~/anaconda3/envs/tf2.0/lib/python3.6/site-packages/tensorflow_core/lite/python/interpreter_wrapper
+
+​	（注意：tf2.x以上在...site-packages/tensorflow_core/...    tf1.x则是在...site-packages/tensorflow/..）
+
+​	为解释器so文件建立软连接
+
+```shell
+ln -s /home/gx/myproj/tensorflow/bazel-bin/tensorflow/lite/python/interpreter_wrapper/_tensorflow_wrap_interpreter_wrapper.so _tensorflow_wrap_interpreter_wrapper.so
+```
+
+​	每次更改算子kernel源代码 -> bazel build -> 重启解释环境 例如jupyter notebook 构建解释器即可使用更新的op算子
 
 ### 4.3.4 构建Android解释器aar包
 
