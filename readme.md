@@ -207,11 +207,12 @@ bazel build --config opt //tensorflow/lite/python/interpreter_wrapper:tensorflow
 
 #### 增添custom op
 
-##### a. 编写新算子的 zerof.cc源文件 
+##### a. 编写算子源文件 
 
 格式为：
 
 ```c++
+// zero.cc
 #include "tensorflow/lite/c/c_api_internal.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
@@ -261,7 +262,7 @@ cc_library(
 TfLiteRegistration* Register_ZEROS();
 ```
 
-##### d. 添加注册语句
+##### d. 注册算子
 
 在 register.cc   register_ref.cc 添加
 
@@ -280,19 +281,108 @@ AddCustom("Zerof", tflite::ops::custom::Register_ZEROF());
 
 ##### e. polish编译验证流程
 
-​	使用bazel build一次之后，tensorflow的源代码文件夹下已经包含了解释器的so文件
+使用bazel build一次之后，tensorflow的源代码文件夹下已经包含了解释器的so文件
 
-​	跳转到conda虚拟环境的tensorflow代码位置：~/anaconda3/envs/tf2.0/lib/python3.6/site-packages/tensorflow_core/lite/python/interpreter_wrapper
+跳转到conda虚拟环境的tensorflow代码位置：~/anaconda3/envs/tf2.0/lib/python3.6/site-packages/tensorflow_core/lite/python/interpreter_wrapper
 
-​	（注意：tf2.x以上在...site-packages/tensorflow_core/...    tf1.x则是在...site-packages/tensorflow/..）
+（注意：tf2.x以上在...site-packages/tensorflow_core/...    tf1.x则是在...site-packages/tensorflow/..）
 
-​	为解释器so文件建立软连接
+为解释器so文件建立软连接
 
 ```shell
 ln -s /home/gx/myproj/tensorflow/bazel-bin/tensorflow/lite/python/interpreter_wrapper/_tensorflow_wrap_interpreter_wrapper.so _tensorflow_wrap_interpreter_wrapper.so
 ```
 
-​	每次更改算子kernel源代码 -> bazel build -> 重启解释环境 例如jupyter notebook 构建解释器即可使用更新的op算子
+每次更改算子kernel源代码 -> bazel build -> restart解释环境 例如jupyter notebook 即可使用更新的op算子
+
+##### f. 算子增加属性
+
+在tflite中custom op的属性和tf中custom op的属性不同，是因为保存模型的格式不同
+
+tflite使用flexbuffer进行模型保存 是flatbuffer的一个精简子集
+
+以extract_image_patches算子为例，tf中该算子的属性包括
+
+```c++
+ std::vector<int32> ksizes_;
+ std::vector<int32> strides_;
+ std::vector<int32> rates_;
+ string padding_;
+```
+
+为增加四个属性，需要在custom op的kernel源代码中实现Init和Free方法
+
+首先，在命名空间中定义一个结构体用来暂存各个属性
+
+```c++
+namespace extract_image_patches {
+typedef struct {
+  std::vector<int32> ksizes_;
+  std::vector<int32> strides_;
+  std::vector<int32> rates_;
+  string padding_;
+} TfLiteEIPOParams;
+...
+```
+
+第二，在Init方法中从tflite的flexbuffer格式模型中读出属性值，存入上述结构体
+
+```c++
+// 加上相关include
+#include "flatbuffers/flexbuffers.h"  // TF:flatbuffers
+#include <vector>
+#include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
+#include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
+#include "tensorflow/lite/kernels/op_macros.h"
+
+
+void* Init(TfLiteContext* context, const char* buffer, size_t length) {
+  auto* data = new TfLiteEIPOParams;//开辟一块空间存属性值
+  const uint8_t* buffer_t = reinterpret_cast<const uint8_t*>(buffer);//属性存在模型的buffer里面
+  const flexbuffers::Map& m = flexbuffers::GetRoot(buffer_t, length).AsMap();//参考flexbuffer官网文档 m可以理解为一个json
+  
+  //这里需要用AsTypedVector读出，如果用AsVector会失败，原因不明，可能flexbuffer做了奇怪的优化
+  //注意：此处读出为vector其实不是cpp的std vector 而是flexbuffer的vector 
+  //     所以还需通过AsInt32等方式获取为数值
+  //     同样的AsString()之后需要用c_str()转化为cpp的格式
+  data->rates_.push_back(m["rates"].AsTypedVector()[0].AsInt32());
+  data->rates_.push_back(m["rates"].AsTypedVector()[1].AsInt32());
+  data->rates_.push_back(m["rates"].AsTypedVector()[2].AsInt32());
+  data->rates_.push_back(m["rates"].AsTypedVector()[3].AsInt32());
+
+  data->ksizes_.push_back(m["ksizes"].AsTypedVector()[0].AsInt32());
+  data->ksizes_.push_back(m["ksizes"].AsTypedVector()[1].AsInt32());
+  data->ksizes_.push_back(m["ksizes"].AsTypedVector()[2].AsInt32());
+  data->ksizes_.push_back(m["ksizes"].AsTypedVector()[3].AsInt32());
+
+  data->strides_.push_back(m["strides"].AsTypedVector()[0].AsInt32());
+  data->strides_.push_back(m["strides"].AsTypedVector()[1].AsInt32());
+  data->strides_.push_back(m["strides"].AsTypedVector()[2].AsInt32());
+  data->strides_.push_back(m["strides"].AsTypedVector()[3].AsInt32());
+    
+  data->padding_ = m["padding"].AsString().c_str();
+
+  return data;
+}
+
+void Free(TfLiteContext* context, void* buffer) {
+  delete reinterpret_cast<TfLiteEIPOParams*>(buffer);//最后释放空间
+}
+```
+
+第三，在Prepare和Eval方法中，查寻该属性
+
+```c++
+TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
+...
+auto* params = reinterpret_cast<TfLiteEIPOParams*>(node->user_data);
+//其实属性被解释器读取后 放在node的user_data之中 读出并用TfLiteEIPOParams格式化
+auto temp = params->ksizes_[0]; //使用属性值
+...
+}
+```
+
+
 
 ### 4.3.4 构建Android解释器aar包
 
@@ -316,7 +406,7 @@ bazel-genfiles/tensorflow/contrib/lite/java/tensorflow-lite.aar
 
 #### 增添custom op
 
-##### a. 编写新算子zerof.cc源文件
+##### a. 编写算子源文件
 
 直接将算子源文件 改扩展名为zerof.h  并放置在tensorflow/lite/java/src/main/native路径下
 
