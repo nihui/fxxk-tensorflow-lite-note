@@ -152,9 +152,13 @@ workspace 在build安卓aar时使用 本地tensorflow和lite不需要设置 默�
 
 更改  build:opt --host_copt=-march=native   为   build:opt --host_copt=-mtune=generic
 
+注：上述修改的场景是服务器打包并准备在本地使用，服务器cpu和本地cpu不同
+
 ## 4.3 build相关
 
-tensorflow目录下的bazel-bin等目录是.cache的链接
+tensorflow目录下的bazel-bin等目录是~/.cache/bazel/...的链接 
+
+如果更换tensorflow版本，需要用bazel clean命令清除残留缓存
 
 ### 4.3.1 构建tensorflow
 
@@ -166,6 +170,12 @@ bazel build //tensorflow/tools/pip_package:build_pip_package --cxxopt="-D_GLIBCX
 source activate xxx
 pip install /tmp/tensorflow_pkg/tensorflow-cp36xxxx.whl    #安装tensorflow
 ```
+
+本地机器初次build（i5 cpu 8gb内存）约7小时，需要限制bazel线程数（参见bazel文档），并配好梯子和sock5代理
+
+海外服务器初次build打包速度约2小时左右，原因是bazel动态下载所需的库和文件
+
+修改源文件后，增量build时间很短，具体时间视修改所关联的文件不同，单独文件修改大约十秒级别
 
 ### 4.3.2 单独构建tensorflow custom op的.so共享库
 
@@ -179,7 +189,7 @@ TF_LFLAGS=( $(python -c 'import tensorflow as tf; print("".join(tf.sysconfig.get
 g++ -std=c++11 -shared zerof.cc -o zerof.so -fPIC ${TF_CFLAGS[@]} ${TF_LFLAGS[@]} -D_GLIBCXX_USE_CXX11_ABI=0 -O2
 ```
 
-g++构建为 zerof.so文件 使用bazel会出现google protobuf依赖找不到等诡异问题
+这里直接使用了g++构建 zerof.so文件 原因是本地使用bazel会出现google protobuf依赖找不到等诡异问题
 
 ```python
 tf.load_op_library('??/zerof.so').zerof()  #调用so中的op
@@ -188,8 +198,6 @@ tf.load_op_library('??/zerof.so').zerof()  #调用so中的op
 ### 4.3.3 单独构建python tensorflow lite解释器的.so共享库
 
 注意：
-
-​    仅在tf2.1下实验成功 
 
 ​    之前版本使用SWIG进行cpp和python之间的交互   后续tf官方将改为pybind11的方式实现交互
 
@@ -207,7 +215,7 @@ bazel build --config opt //tensorflow/lite/python/interpreter_wrapper:tensorflow
 
 #### 增添custom op
 
-tf 2.1 验证     
+tf 1.14  2.1 验证     
 
 ##### a. 编写算子源文件 
 
@@ -575,11 +583,100 @@ output_data = interpreter.get_tensor(output_details[0]['index']) # 取输出观�
 print(output_data)
 ```
 
+# 6. TfLite模型手动解析
 
+## 6.1 flatbuffer和flexbuffer
 
+### 6.1.1 简介及schema文件
 
+flatbuffer是在高速场景下替代json的序列化开源库，因为是二进制格式，不需要像json建立诸多对象，存取速度很快
 
+tflite模型存储格式为flatbuffer的精简版本flexbuffer  官方文档链接如下
 
+https://google.github.io/flatbuffers/flatbuffers_guide_tutorial.html
 
+flatbuffer需要由模板文件schema来定义，该文件详细定义了在二进制buffer中以怎样的步进读取数据，此处不赘述
 
+tensorflowlite的模型存储模板schema文件在tensorflow源代码中可以找到：
+
+<source_root>/tensorflow/lite/schema/schema.fbs
+
+### 6.1.2 解析工具flatc
+
+确保cmake已经正确安装 推荐官网二进制版本
+
+克隆flatbuffer的源代码仓库git clone https://github.com/google/flatbuffers.git
+
+```shell
+cmake -G "Unix Makefiles" //生成MakeFile
+make //生成flatc
+make install //安装flatc
+flat --version
+```
+
+解析tflite文件到JSON格式：注意--后的空格
+
+```shell
+./flatc -t schema.fbs -- my.tflite
+```
+
+该模型my.tflite将被解析为my.json
+
+```shell
+./flatc -b schema.fbs my.json
+```
+
+该文件my.json将被反解析回my.lite模型
+
+上述两个转化操作均会自动覆盖更新转化的目标文件
+
+## 6.2 TfLite模型定义
+
+TfLite模型的关键数据结构定义如下（部分省略）：
+
+```json
+Model
+	operator_codes                     //列出用到的全部算子 对应的代码
+		builtin_code 
+	subgraphs                          //子图
+		tensors                        //列出用到的所有张量（图的边）
+			shape
+			buffer                     //该张量参数存储使用到的buffer编号
+			name                       //张量名 定义模型时用name命名 或者自动命名 netron等工具查看
+			quantization              
+		inputs                         //输入节点（node）编号
+		outputs				           //输出节点编号
+		operators                      //列出用到的所有节点
+			opcode_index               //该节点的算子代码序号 对应operator_codes 中序号
+			inputs                     //该节点输入张量编号
+			outputs                    //该节点输出张量编号
+			...                        //其他属性等
+	buffers                            //参数仓库
+```
+
+例如需要手动修改移除某节点，流程如下：
+
+a. 将tflite模型通过flatc转换成json格式
+
+b. 在json文件中找到需要移除的节点（model subgraph operators xxx）把他的输入张量对接给他的下层节点，
+
+c. 删除该operators防止悬空节点出现
+
+d. 在operator_codes等处做相应修改
+
+e. 使用flatc工具更新tflite模型
+
+## 6.3 TfLite解释器加载与解析
+
+解释器加载tflite模型，放入内存只读区域，也有一些需要动态更新的buffer另开辟动态区域，解释器主要处理张量和节点两大内容
+
+a. 对于tensor，首先解析为TfLiteTensor，并且将所有的TfLiteTensor整合为一张TfLiteContext表
+
+​	在TfLiteContext中保存的是tensor的大小格式等信息和指向内存中加载模型真实张量的指针
+
+b. 对于node，首先解析operators为TfLiteNode
+
+​	并为之对应的匹配存在于TfLiteRegistration中的算子的kernel指针
+
+至此完成了模型的加载
 
