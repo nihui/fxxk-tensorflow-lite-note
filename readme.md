@@ -207,6 +207,8 @@ bazel build --config opt //tensorflow/lite/python/interpreter_wrapper:tensorflow
 
 #### 增添custom op
 
+tf 2.1 验证     
+
 ##### a. 编写算子源文件 
 
 格式为：
@@ -219,7 +221,7 @@ bazel build --config opt //tensorflow/lite/python/interpreter_wrapper:tensorflow
 
 namespace tflite {
 namespace ops {
-namespace custom {    // 注意1.x版本官方是放到了builtin命名空间 2.1需要放在custom命名空间
+namespace custom {    // 需要放在custom命名空间
 namespace zerof {
 TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {}                             
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {}
@@ -233,6 +235,10 @@ TfLiteRegistration* Register_ZEROF() {
 }  // namespace ops
 }  // namespace tflite
 ```
+
+如果加载模型报错：tensorflow_wrap_interpreter_wrapper.so: undefined symbol: _ZN6tflite3ops6custom30Register_EXTRACT_IMAGE_PATCHES
+
+这是因为命名空间namespace custom 也许写成了builtin，混入了别的命名空间而无法被识别
 
 在kernels路径下
 
@@ -273,8 +279,8 @@ TfLiteRegistration* Register_ZEROF();
 
 BuiltinOpResolver::BuiltinOpResolver(){
 AddCustom("Zerof", tflite::ops::custom::Register_ZEROF());  
-    // Zerof 这里我们需严格使用大驼峰命名 例如: ExtractImagesPatches
-    // 在编译为解释器之后 算子名将被自动转化为下划线所谓snack格式 例如: extract_images_patches
+    // Zerof 这里我们需严格使用大驼峰命名 例如: ExtractImagePatches
+    // 在编译为解释器之后 算子名将被自动转化为下划线所谓snack格式 例如: extract_image_patches
     // 另注: Register_ZEROF这个名称没有上面两条的限制 随便定义 统一即可
 }
 ```
@@ -379,6 +385,28 @@ auto* params = reinterpret_cast<TfLiteEIPOParams*>(node->user_data);
 //其实属性被解释器读取后 放在node的user_data之中 读出并用TfLiteEIPOParams格式化
 auto temp = params->ksizes_[0]; //使用属性值
 ...
+}
+```
+
+##### g. TfLite  输出tensor维度修改
+
+TfLite将模型的tensor统一用指针形式保存到context里面，对于一个op想输出指定维度的tensor，需要用到context类自带的ResizeTensor方法，参见源代码其他op的示例
+
+需要特定的参数TfLiteIntArray* dims，指定resize目标tensor的维度
+
+TfLiteIntArray结构包含int size和int data[] 依次指定即可，例如：
+
+```c++
+TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
+...
+  TfLiteIntArray* ret = TfLiteIntArrayCreate(input->dims->size);
+  ret->data[0] = 1;
+  ret->data[1] = 2;
+  ret->data[2] = 2;
+  ret->data[3] = 1;
+
+  return context->ResizeTensor(context, output,
+                               TfLiteIntArrayCopy(ret));
 }
 ```
 
