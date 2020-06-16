@@ -636,22 +636,22 @@ TfLite模型的关键数据结构定义如下（部分省略）：
 
 ```json
 Model
-	operator_codes                     //列出用到的全部算子 对应的代码
-		builtin_code 
-	subgraphs                          //子图
-		tensors                        //列出用到的所有张量（图的边）
-			shape
-			buffer                     //该张量参数存储使用到的buffer编号
-			name                       //张量名 定义模型时用name命名 或者自动命名 netron等工具查看
-			quantization              
-		inputs                         //输入节点（node）编号
-		outputs				           //输出节点编号
-		operators                      //列出用到的所有节点
-			opcode_index               //该节点的算子代码序号 对应operator_codes 中序号
-			inputs                     //该节点输入张量编号
-			outputs                    //该节点输出张量编号
-			...                        //其他属性等
-	buffers                            //参数仓库
+  operator_codes                     //列出用到的全部算子 对应的代码
+    builtin_code 
+  subgraphs                          //子图
+    tensors                          //列出用到的所有张量（图的边）
+      shape
+      buffer                         //该张量参数存储使用到的buffer编号
+      name                           //张量名 定义模型时用name命名 或者自动命名 netron等工具查看
+      quantization              
+    inputs                           //输入节点（node）编号
+    outputs                          //输出节点编号
+    operators                        //列出用到的所有节点
+      opcode_index                   //该节点的算子代码序号 对应operator_codes 中序号
+      inputs                         //该节点输入张量编号
+      outputs                        //该节点输出张量编号
+      ...                            //其他属性等
+  buffers                            //参数仓库
 ```
 
 例如需要手动修改移除某节点，流程如下：
