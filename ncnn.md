@@ -465,10 +465,26 @@ index = 1
 x = 'inpaint'   # 本分支输入（上级的blob 这里都用字符串来表示blob）
 for i in stage1:
     unitType = 'TanH' if index == 17 else 'ELU'       # 处理不同触发类型的卷积单元
-    deconv = True if index in [13,15] else False      # 处理解卷积单元
+    deconv = True if index in [13,15] else False      # 处理反卷积单元
     x = save_conv_unit(unitType,i,x,deconv,'stage1')  # 命名前缀加上stage1
     index += 1                                        # 用index计数来识别不同的卷积单元 防止tflite结构改变算子编号改变
 ```
+
+特别关注反卷积问题
+
+在tensorflow中，反卷积有两类实现方式：
+
+1.使用转置卷积 
+
+tf.nn.conv2d_transpose 参数表为：输入张量，卷积核（h,w,o,i 注意这里不是正卷积时候的H W I O），目标张量shape（也即是正卷积前的维度），striders（注意是正卷积时的步进），padding
+
+转置卷积在数学逻辑上全等于 resize + conv2d。先进行的以strider计算的扩充性 resize， 特别注意这里resize是用了直接补零，而非最邻近或者线性插值。
+
+转置卷积也可选进行参数训练
+
+2.使用resize和conv2d算子组合
+
+以本模型为例，主干网络有几个deconv（这特么其实也是反卷积，意义一样），构建模型的python代码中就直接用了resize_nearest_neighbor+conv2d。虽然这里用了最邻近插值，但鉴于反卷积不是一个数学上的严格概念，也即是不同的反卷积补零方式可以得到不同的结果，并没有唯一的解。 
 
 
 
@@ -508,6 +524,204 @@ def trans_csv_to_param():
             outputcontent = '7767517\n'+'%s '%(row_index)+'%s\n'%(len(list(set(blobs))))+outputcontent
             p.write(outputcontent)
 ```
+
+# 7 ncnn不支持的自定义层实现原理
+
+## 基础张量运算层
+
+### transpose
+
+考虑到可读性，实现转置需要单独对不同维度数的张量编写（否则要上递归）
+
+以四维卷积为例，原张量shape为 （1，2，3，4）
+
+```python
+a = np.arange(24).reshape(1,2,3,4)
+[[[[ 0  1  2  3]
+   [ 4  5  6  7]
+   [ 8  9 10 11]]
+
+  [[12 13 14 15]
+   [16 17 18 19]
+   [20 21 22 23]]]]
+```
+
+转置目标维度表为：（2，1，0，3）也即是将第一维换到第三维，此处是维度编号和shape注意区分
+
+实现转置函数如下：arr为原张量，dimtable为转置目标维度表
+
+```python
+def transpose(arr,dimtable):
+    farr = arr.flatten() # 先将原张量摊平 赋值给farr 方便以偏移量直接索引 在c代码中可以直接用指针实现无需此过程
+    
+    shape = arr.shape    # ori 原始shape 1，2，3，4
+    
+    r_shape = []         # now 目标shape 3，2，1，4
+    for i in dimtable:
+        r_shape.append(shape[i])
+        
+    res = []             # 开辟新shape的张量 按顺序append 等同于c代码指针按顺序处理
+    shift = [shape[1]*shape[2]*shape[3],shape[2]*shape[3],shape[3],1]  # 原shape偏移表 => [24,12,4,1]
+    
+    for i in range(r_shape[0]):                  # 新shape第一维度
+        for j in range(r_shape[1]):              # 新shape第二维度
+            for m in range(r_shape[2]):          # 新shape第三维度
+                for n in range(r_shape[3]):      # 新shape第四维度
+                    step = 0
+                    step += i*shift[dimtable[0]] # 读目标维度表 查原shape偏移表 shift[2] = 4
+                    step += j*shift[dimtable[1]] # 读目标维度表 查原shape偏移表 shift[1] = 12                   
+                    step += m*shift[dimtable[2]] # 读目标维度表 查原shape偏移表 shift[0] = 24    
+                    step += n*shift[dimtable[3]] # 读目标维度表 查原shape偏移表 shift[3] = 1    
+                    res.append(farr[step])       # 用step来偏移 从扁平张量farr索引 c代码用指针偏移直接实现
+    return np.array(res).reshape(r_shape)
+```
+
+test 结果
+
+```python
+print( transpose(a,(2,1,0,3)) )
+
+[[[[ 0  1  2  3]]
+  [[12 13 14 15]]]
+ [[[ 4  5  6  7]]
+  [[16 17 18 19]]]
+ [[[ 8  9 10 11]]
+  [[20 21 22 23]]]]
+```
+
+
+
+### extract_image_patches
+
+从图像张量中，抽取patch，并将抽取到的patch和通道一并摊平
+
+例如：shape:(1,10,10,3)的一个10*10图像
+
+```python
+n = 10
+images = [[[[x*n + y + 1, x*n + y + 1, x*n + y + 1] for y in range(n)] for x in range(n)]]
+print(images)
+images = np.array(images,  dtype=np.int32)
+
+[[[[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4], [5, 5, 5], [6, 6, 6], [7, 7, 7], [8, 8, 8], [9, 9, 9], [10, 10, 10]], [[11, 11, 11], [12, 12, 12], [13, 13, 13], [14, 14, 14], [15, 15, 15], [16, 16, 16], [17, 17, 17], [18, 18, 18], [19, 19, 19], [20, 20, 20]], [[21, 21, 21], [22, 22, 22], [23, 23, 23], [24, 24, 24], [25, 25, 25], [26, 26, 26], [27, 27, 27], [28, 28, 28], [29, 29, 29], [30, 30, 30]], [[31, 31, 31], [32, 32, 32], [33, 33, 33], [34, 34, 34], [35, 35, 35], [36, 36, 36], [37, 37, 37], [38, 38, 38], [39, 39, 39], [40, 40, 40]], [[41, 41, 41], [42, 42, 42], [43, 43, 43], [44, 44, 44], [45, 45, 45], [46, 46, 46], [47, 47, 47], [48, 48, 48], [49, 49, 49], [50, 50, 50]], [[51, 51, 51], [52, 52, 52], [53, 53, 53], [54, 54, 54], [55, 55, 55], [56, 56, 56], [57, 57, 57], [58, 58, 58], [59, 59, 59], [60, 60, 60]], [[61, 61, 61], [62, 62, 62], [63, 63, 63], [64, 64, 64], [65, 65, 65], [66, 66, 66], [67, 67, 67], [68, 68, 68], [69, 69, 69], [70, 70, 70]], [[71, 71, 71], [72, 72, 72], [73, 73, 73], [74, 74, 74], [75, 75, 75], [76, 76, 76], [77, 77, 77], [78, 78, 78], [79, 79, 79], [80, 80, 80]], [[81, 81, 81], [82, 82, 82], [83, 83, 83], [84, 84, 84], [85, 85, 85], [86, 86, 86], [87, 87, 87], [88, 88, 88], [89, 89, 89], [90, 90, 90]], [[91, 91, 91], [92, 92, 92], [93, 93, 93], [94, 94, 94], [95, 95, 95], [96, 96, 96], [97, 97, 97], [98, 98, 98], [99, 99, 99], [100, 100, 100]]]]
+
+```
+
+python代码实现如下：
+
+```python
+def extract_image_patches(images,sizes,strides,rates,padding):
+    farr = images.flatten()              # 先将原张量摊平 赋值给farr 方便以偏移量直接索引 在c代码中可以直接用指针实现无需此过程
+    padding_row_num = (int) ((images.shape[1] + strides[1] - 1) / strides[1])        # 求pad矩阵的 行数 = 2
+    padding_col_num = (int) ((images.shape[2] + strides[2] - 1) / strides[2])        # 求pad矩阵的 列数 = 2
+    padding_cha_num = sizes[1]*sizes[2]*images.shape[3]                              # 求pad矩阵的 通道 = 4×4×3 = 48
+
+    res = [] # 空列表 按顺序append 等同于c代码指针按顺序处理
+    
+    # 处理pad矩阵中每个pad
+    for i in range(padding_row_num):
+        for j in range(padding_col_num):
+            padding_anchor = j*strides[2] + i*strides[1]*images.shape[2]      # 在原张量中找到pad的左上角所在的全局偏移量
+            
+            # 单独处理一个pad 按照sizes处理pad局部坐标 m,n
+            for m in range(sizes[1]):
+                for n in range(sizes[2]): 
+                    # 在原张量内定位待处理局部点 和padding_anchor拼接为局部点的全局偏移量pros_pointer
+                    pros_pointer = padding_anchor + n*rates[2] + m*rates[1]*images.shape[2]
+                    pros_pointer *= images.shape[3]
+					# 判断是否行列越界 这里默认SAME补零了 如需要VALID另行处理
+                    isOutRow = (int)(padding_anchor / images.shape[2]) + m > images.shape[1]-1
+                    isOutCol = padding_anchor % images.shape[2] + n > images.shape[2]-1
+                    if isOutRow or isOutCol:
+                        for ic in range(images.shape[3]): # 将每个通道摊平 append进res
+                            res.append(0)
+                        continue
+                    # 处理非越界的正常状况 每个通道摊平 从farr中用偏移量寻址
+                    for ic in range(images.shape[3]):
+                        res.append(farr[pros_pointer+ic])
+    return np.array(res).reshape(1,padding_row_num,padding_col_num,padding_cha_num)  # 返回时reshape c代码用指针 无所谓
+```
+
+运行得到一个4个patch 每个patch都是4×4×3 = 48 
+
+```python
+with tf.Session() as sess:
+    res = tf.extract_image_patches(images=images,sizes=[1,4,4,1],strides=[1,7,7,1],rates=[1,1,1,1],padding='SAME').eval()
+    print(res)
+    print(res.shape)
+
+[[[[  1   1   1   2   2   2   3   3   3   4   4   4  11  11  11  12  12
+     12  13  13  13  14  14  14  21  21  21  22  22  22  23  23  23  24
+     24  24  31  31  31  32  32  32  33  33  33  34  34  34]
+   [  8   8   8   9   9   9  10  10  10   0   0   0  18  18  18  19  19
+     19  20  20  20   0   0   0  28  28  28  29  29  29  30  30  30   0
+      0   0  38  38  38  39  39  39  40  40  40   0   0   0]]
+
+  [[ 71  71  71  72  72  72  73  73  73  74  74  74  81  81  81  82  82
+     82  83  83  83  84  84  84  91  91  91  92  92  92  93  93  93  94
+     94  94   0   0   0   0   0   0   0   0   0   0   0   0]
+   [ 78  78  78  79  79  79  80  80  80   0   0   0  88  88  88  89  89
+     89  90  90  90   0   0   0  98  98  98  99  99  99 100 100 100   0
+      0   0   0   0   0   0   0   0   0   0   0   0   0   0]]]]
+shape:(1, 2, 2, 48)
+```
+
+
+
+## 组合功能层
+
+### extract_image_patches reshape transpose  （ERT）
+
+输入： dim=3的ncnn::Mat   （隐含原始图片shape）
+
+参数： 0 = sizes
+
+​			1 = strides
+
+输出： dim=1的ncnn::Mat   输出作为filter 因为是4维的ncnn不支持  将shape作为参数直接写到自定义的二输入卷积中
+
+
+
+处理流程：
+
+输入Mat  input（64，85，1）                  
+
+------
+
+@ERT (0=3,1=1)
+
+-----
+
+in： input
+
+< extract_image_patches(input ,3,1,1,'SAME') >
+
+out： res（dim=1） shape =（64，85，9）               inputElementN = 64×85×9
+
+---
+
+reshape直接计算 shape = （5440，3，3， inputElementN/3/3/5440）
+
+---
+
+in： res  shape = （5440，3，3，1）
+
+< transpose >
+
+out： res（dim=1）
+
+---
+
+输出Mat   res（5440）
+
+
+
+
+
+
+
+
+
 
 
 
