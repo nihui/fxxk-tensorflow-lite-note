@@ -328,7 +328,7 @@ def save_data_to_bin(bufferIndex, shape=(), savefilter=True, append=True):
 
 ```python
 def save_conv(name, indexTfLite, inputBlob, outputBlob):
-    # 从json文件中获取卷积各项参数 
+    
     op = model['subgraphs'][0]['operators']
     tensor = model['subgraphs'][0]['tensors']
     
@@ -344,16 +344,16 @@ def save_conv(name, indexTfLite, inputBlob, outputBlob):
         stride_w = op[indexTfLite]['builtin_options']['stride_w']
     else:
         stride_w = '1'
-	
+
     fliterShape = tuple(tensor[filterTensor]['shape'])
     
     param = ['0=' + str(fliterShape[0]),                    # num_output
              '1=' + str(fliterShape[1]),                    # kernel_w   （kernel_h default）
              '2=' + str(dilation_w_factor),                 # rate
              '3=' + str(stride_w),                          # stride
-             '4=-233',                                      # same padding
-             '5=1',                                         # has bias 需要从bin中读取bias
-             '6=' + str(reduce(lambda x,y:x*y,fliterShape)) # filter weight 总长度 
+             '4=-233',                                      # same
+             '5=1',                                         # has bias
+             '6=' + str(reduce(lambda x,y:x*y,fliterShape)) # weight
             ]
     
     append_row_to_csv(['Convolution']+[name]+['1','1']+[inputBlob,name]+param)
@@ -361,24 +361,37 @@ def save_conv(name, indexTfLite, inputBlob, outputBlob):
     save_data_to_bin(tensor[biasTensor]['buffer'],savefilter=False)   # save bias's   buffer 
     return outputBlob
 
+def save_conv2(name, inputBlob, filterBlob, outputBlob,kernel_w,num_output,weight_size):
+
+    param = ['0=' + str(num_output),                        # num_output
+             '1=' + str(kernel_w),                          # kernel_w   （kernel_h default）
+             '2=1',                                         # rate
+             '3=1',                                         # stride
+             '4=-233',                                      # same
+             '5=0',                                         # has no bias
+             '6=' + str(weight_size)                        # weight_size
+            ]
+    
+    append_row_to_csv(['Convolution2']+[name]+['2','1']+[inputBlob,filterBlob,name]+param)
+    return outputBlob
+
 def save_slice(name, inputBlob, outputBlob1, outputBlob2):
-    # tensorflow中 切分张量的算子是split 而在ncnn中 split是复制blob 每个blob必须只有一个输出 所以二分支一定要用split分路
-    # 注意ncnn切分参数 -23300代表0位是一个数组（-23301代表1位为数组） 数组的长度2 元素为-233代表均分
     append_row_to_csv(['Slice']+[name]+['1','2']+[inputBlob,outputBlob1,outputBlob2]+['-23300=2,-233,-233','1=0'])
     return outputBlob1, outputBlob2
 
-def save_interp(name, inputBlob, outputBlob):                         # ResizeNearestNeighbor 2*
-    # 注意插值的参数输入要求为一个float 必须写为 1=2.0 如果写成1=2会出错
-    append_row_to_csv(['Interp']+[name]+['1','1']+[inputBlob,outputBlob]+['0=1','1=2.0','2=2.0']) 
+def save_interp(name, inputBlob, outputBlob, scale=2.0):    # ResizeNearestNeighbor  align corner
+    append_row_to_csv(['Interp']+[name]+['1','1']+[inputBlob,outputBlob]+['0=4','1='+str(scale),'2='+str(scale)]) 
+    return outputBlob
+
+def save_normalize(name, inputBlob, outputBlob):            # custom normalize
+    append_row_to_csv(['Normalize_sp']+[name]+['1','1']+[inputBlob,outputBlob]) 
     return outputBlob
 
 def save_elu(name, inputBlob, outputBlob):
-    # 注意ELU的大小写 
     append_row_to_csv(['ELU']+[name]+['1','1']+[inputBlob,outputBlob]+['0=1.0'])
     return outputBlob
     
 def save_relu(name, inputBlob, outputBlob):
-    # 注意ReLU大小写 
     append_row_to_csv(['ReLU']+[name]+['1','1']+[inputBlob,outputBlob])
     return outputBlob
     
@@ -407,7 +420,6 @@ def save_split(name, inputBlob, outputBlob1, outputBlob2):
     return outputBlob1, outputBlob2
 
 def save_concat(name, inputBlob1, inputBlob2, outputBlob):
-    # 注意concat的维度连接参数 0表示第三维 1表示h维 2表示w维
     append_row_to_csv(['Concat']+[name]+['2','1']+[inputBlob1,inputBlob2,outputBlob]+['0=0']) # 0 dim concat 1 h 2 w
     return outputBlob
 
@@ -418,6 +430,10 @@ def save_input(name, d0, d1, d2):
 def save_memorydata(name, d0, d1, d2):
     append_row_to_csv(['MemoryData']+[name]+['0','1']+[name]+['0='+str(d0)]+['1='+str(d1)]+['2='+str(d2)])
     return name
+
+def save_ert(name,inputBlob, outputBlob, sizes, strides):
+    append_row_to_csv(['Ert']+[name]+['1','1']+[inputBlob,outputBlob]+['0='+str(sizes),'1='+str(strides)]) 
+    return outputBlob
 ```
 
 
@@ -525,13 +541,13 @@ def trans_csv_to_param():
             p.write(outputcontent)
 ```
 
-# 7 ncnn不支持的自定义层实现原理
+# 7 ncnn不支持层原理与实现
 
-## 基础张量运算层
+## 基础张量运算
 
-### transpose
+### 7.1 transpose 原理
 
-考虑到可读性，实现转置需要单独对不同维度数的张量编写（否则要上递归）
+考虑到可读性，实现转置需要单独对不同维度数的张量编写（否则要上递归）ncnn只提供了三维及以下张量的转置 permute层，要处理tensorflow的各种四维张量或者conv的四维filter，需要自定义层transpose来实现
 
 以四维卷积为例，原张量shape为 （1，2，3，4）
 
@@ -589,9 +605,32 @@ print( transpose(a,(2,1,0,3)) )
   [[20 21 22 23]]]]
 ```
 
+ncnn c++写法
+
+```c++
+int shape[4] = {w,h,input,output};
+int shift[4] = {shape[1]*shape[2]*shape[3],shape[2]*shape[3],shape[3],1};
+int t[4] = {3,2,0,1};               // transpose tabel
+
+ncnn::Mat temp = top_blob.clone();  // temp save the blob which is prepare to transpose
+outptr = top_blob.channel(0);       // re point to top_blob start position
+float* temptr = temp.channel(0);
+
+int index = 0;
+for(int i=0;i<shape[t[0]];i++){
+    for(int j=0;j<shape[t[1]];j++){
+        for(int m=0;m<shape[t[2]];m++){
+            for(int n=0;n<shape[t[3]];n++){
+                outptr[index++] = temptr[i*shift[t[0]] + j*shift[t[1]] + m*shift[t[2]] + n*shift[t[3]]];
+            }
+        }
+    }
+}
+```
 
 
-### extract_image_patches
+
+### 7.2 extract_image_patches 原理
 
 从图像张量中，抽取patch，并将抽取到的patch和通道一并摊平
 
@@ -608,6 +647,8 @@ images = np.array(images,  dtype=np.int32)
 ```
 
 python代码实现如下：
+
+注：该代码有问题，对于SAME情况 左侧和上侧补零和tensorflow不对应 tf使用了eigen 实现方法不明 在ncnn中使用手动指示起始点坐标的方法间接解决问题
 
 ```python
 def extract_image_patches(images,sizes,strides,rates,padding):
@@ -668,9 +709,157 @@ shape:(1, 2, 2, 48)
 
 
 
-## 组合功能层
+### 7.3 Interp 中心对齐 修改ncnn
 
-### extract_image_patches reshape transpose  （ERT）
+中心对齐问题
+
+tf.image.resize_nearest_neighbor包含中心对齐（或者称为align_corners）的问题
+
+如果不考虑中心对齐（align_corners = False）
+
+则 x = dx*（w/ dw） 目标矩阵dx对应原始矩阵的x转换公式，例如
+
+```python
+[[ 0  1  2  3  4  5  6  7]
+ [ 8  9 10 11 12 13 14 15]
+ [16 17 18 19 20 21 22 23]
+ [24 25 26 27 28 29 30 31]
+ [32 33 34 35 36 37 38 39]
+ [40 41 42 43 44 45 46 47]
+ [48 49 50 51 52 53 54 55]
+ [56 57 58 59 60 61 62 63]]
+[[ 0  2  4  6]
+ [16 18 20 22]
+ [32 34 36 38]
+ [48 50 52 54]]
+```
+
+如果考虑中心对齐（align_corners = True）
+
+则 x =  dx*（（w-1）/ （dw-1）） 例如 dx=2 则x=2×（7 / 3） = 4.6四舍五入为5
+
+```python
+[[ 0  1  2  3  4  5  6  7]
+ [ 8  9 10 11 12 13 14 15]
+ [16 17 18 19 20 21 22 23]
+ [24 25 26 27 28 29 30 31]
+ [32 33 34 35 36 37 38 39]
+ [40 41 42 43 44 45 46 47]
+ [48 49 50 51 52 53 54 55]
+ [56 57 58 59 60 61 62 63]]
+[[ 0  2  5  7]
+ [16 18 21 23]
+ [40 42 45 47]
+ [56 58 61 63]]
+```
+
+在ncnn中，修改interp层，增加一个resize_type 表示nearest方法中心对齐：
+
+```c++
+    else if (resize_type == 4) //align_corners  nearest
+    {
+        float Rh = (h-1)/(float)(h*height_scale-1);
+        float Rw = (w-1)/(float)(w*width_scale-1);    //（（w-1）/ （dw-1））
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int q = 0; q < c; ++q)
+        {
+            const float *ptr = bottom_blob.channel(q);
+            float *output_ptr = top_blob.channel(q);
+            for (int y = 0; y < oh; ++y)
+            {
+                const int in_y = std::min((int)(y*Rh+0.5), (h - 1));
+                for (int x = 0; x < ow; ++x)
+                {
+                    const int in_x = std::min((int)(x*Rw+0.5), (w - 1));  //x =  dx*（（w-1）/ （dw-1））
+                    output_ptr[ow * y + x] = ptr[in_y * w + in_x];
+                }
+            }
+        }
+        return 0;
+    }
+```
+
+
+
+### 7.4 Normalize_sp 自定义ncnn层
+
+抽象tf.nn.l2_normalize(w,axis=[0,1,2]) 过程
+
+**注意：**并增加transpose 3,2,0,1 以配合后面的convolution2 （ncnn的卷积filter排布为：oihw）
+
+```c++
+int Normalize_sp::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+{
+    float eps = 0.0001f;
+    int w = 3;
+    int h = 3;
+    int input = 96;
+    int output = 5440;
+    size_t elemsize = bottom_blob.elemsize;
+    int size = w * h * input;
+    // square
+    Mat square_sum_blob;
+    square_sum_blob.create(output, elemsize, opt.workspace_allocator);
+    if (square_sum_blob.empty())
+        return -100;
+    const float* ptr = bottom_blob.channel(0);  // point to the head of bottom blob
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int q=0; q<output; q++)
+    {
+        float ssum = 0.f;
+        for (int i=0; i<size; i++)
+        {
+            ssum += ptr[i*output+q] * ptr[i*output+q];
+        }
+
+        square_sum_blob[q] = 1.f / (sqrt(ssum)+eps);
+    }
+
+    // output to top blob
+    top_blob.create(size * output, elemsize, opt.blob_allocator);
+    if (top_blob.empty())
+        return -100;
+    float* outptr = top_blob.channel(0);
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int q=0; q<output; q++)
+    {
+        for(int i=0; i<size; i++){
+            outptr[i*output+q] = ptr[i*output+q] * square_sum_blob[q];
+        }
+        // std::cout<<q<<" ";
+    }
+
+    // from tensorflow shape h,w,i,o transpose to ncnn shape o,i,h,w
+    int shape[4] = {w,h,input,output};
+    int shift[4] = {shape[1]*shape[2]*shape[3],shape[2]*shape[3],shape[3],1};
+    int t[4] = {3,2,0,1};               // transpose tabel
+
+    ncnn::Mat temp = top_blob.clone();  // temp save the blob which is prepare to transpose
+    outptr = top_blob.channel(0);       // re point to top_blob start position
+    float* temptr = temp.channel(0);
+
+    int index = 0;
+    for(int i=0;i<shape[t[0]];i++){
+        for(int j=0;j<shape[t[1]];j++){
+            for(int m=0;m<shape[t[2]];m++){
+                for(int n=0;n<shape[t[3]];n++){
+                    outptr[index++] = temptr[i*shift[t[0]] + j*shift[t[1]] + m*shift[t[2]] + n*shift[t[3]]];
+                }
+            }
+        }
+    }
+
+    std::cout<<" norm "<<std::endl;
+
+    return 0;
+}
+```
+
+
+
+### 7.5 Ert  自定义ncnn层
+
+extract_image_patches reshape transpose  
 
 输入： dim=3的ncnn::Mat   （隐含原始图片shape）
 
@@ -682,13 +871,9 @@ shape:(1, 2, 2, 48)
 
 
 
-处理流程：
+**处理流程**：
 
-输入Mat  input（64，85，1）                  
-
-------
-
-@ERT (0=3,1=1)
+输入Mat  input（64，85，1）     @ERT (0=3,1=1)
 
 -----
 
@@ -700,7 +885,7 @@ out： res（dim=1） shape =（64，85，9）               inputElementN = 64�
 
 ---
 
-reshape直接计算 shape = （5440，3，3， inputElementN/3/3/5440）
+< reshape >         直接计算 shape = （5440，3，3， inputElementN/3/3/5440）
 
 ---
 
@@ -712,19 +897,210 @@ out： res（dim=1）
 
 ---
 
-输出Mat   res（5440）
+输出Mat   res（5440）     @ERT (0=3,1=1)
+
+```c++
+bool debugflag = true;
+
+int w = bottom_blob.w;
+int h = bottom_blob.h;
+// std::cout<<"blob w: "<<w<<" bolb h: "<<h<<std::endl;
+int channels = bottom_blob.c;
+size_t elemsize = bottom_blob.elemsize;
+
+// process steps
+// x = extract_image_patches (botton_blob, sizes=[1,sizes,sizes,1], strides=[1,strides,strides,1], rates=[1, 1, 1, 1], padding='SAME')
+// x = reshape(x, [5440,sizes,sizes, -1]
+// x = transpose(x, [1, 2, 3, 0])
+
+// cal pad row Num
+int padding_row_num = (int) ((h + strides - 1) / strides);
+int padding_col_num = (int) ((w + strides - 1) / strides);
+int padding_cha_num = sizes*sizes*channels;
+int totalElementNum = padding_row_num * padding_col_num * padding_cha_num;
+// std::cout<<size * channels<<std::endl;
+
+// return an 1-channel top blob
+top_blob.create(totalElementNum, elemsize, opt.blob_allocator);
+if (top_blob.empty())
+    return -100;
+
+float* outptr = top_blob.channel(0);
+// const float* ptr = bottom_blob.channel(0);
+
+// step 1: extract_image_patches
+int index = 0;
+int pad_r_anchor = -1;
+int pad_c_anchor = -1; // 手动写的第一个patch偏移量 tensorflow的SAME实现不清除原理 调用了eigen的方法 通用解析公式没有想到 
+for(int i=0; i<padding_row_num; i++){
+    for(int j=0; j<padding_col_num; j++){
+        int pad_r = pad_r_anchor + i*strides;
+        int pad_c = pad_c_anchor + j*strides;
+        if(debugflag) std::cout<<"pad_r: "<<pad_r<<" pad_c: "<<pad_c;
+        // int padding_anchor = j*strides + i*strides*h;
+        for(int m=0; m<sizes; m++){
+            for(int n=0; n<sizes; n++){
+                int pointer_r = pad_r + m;
+                int pointer_c = pad_c + n;
+
+                if(debugflag) std::cout<<"| "<<pointer_r<<" "<<pointer_c;
+                if(pointer_r >= h||pointer_c >= w||pointer_r<0||pointer_c<0){   
+                    for(int ic=0; ic<channels; ic++){outptr[index++] = 0;if(debugflag) std::cout<<"-";}                       
+                    continue;
+                }
+                #pragma omp parallel for num_threads(opt.num_threads) 
+                for(int ic=0; ic<channels; ic++){
+                    const float* ptr = bottom_blob.channel(ic); //必须把通道指针定义在多线程循环里面 否则会出现奇怪错误
+                    outptr[index+ic] = ptr[pointer_c + pointer_r*w];
+                    if(debugflag && pointer_r==0 && pointer_c == 0) std::cout<<" "<<ptr[pointer_c + pointer_r*w];
+                    // if(debugflag) std::cout<<"%";
+                }
+                index += channels;
+            }
+        }
+        if(debugflag) std::cout<<std::endl;
+    }
+}
+// step 2:  reshape  (1,2,3,0)
+int shape[4] = {5440,sizes,sizes,totalElementNum/5440/sizes/sizes};
+int shift[4] = {shape[1]*shape[2]*shape[3],shape[2]*shape[3],shape[3],1};
+
+int r_shape[4] = {shape[1],shape[2],shape[3],shape[0]};
+
+ncnn::Mat temp = top_blob.clone();  // temp save the blob which is prepare to transpose
+outptr = top_blob.channel(0);       // re point to top_blob start position
+float* temptr = temp.channel(0);
+
+index = 0;
+for(int i=0;i<r_shape[0];i++){
+    for(int j=0;j<r_shape[1];j++){
+        for(int m=0;m<r_shape[2];m++){
+            for(int n=0;n<r_shape[3];n++){
+                outptr[index++] = temptr[i*shift[1] + j*shift[2] + m*shift[3] + n*shift[0]];
+            }
+        }
+    }
+}
+
+```
 
 
 
+### 7.6 Conv 自定义ncnn层
+
+**1.多输入**
+
+注意layer里面对于forward只有两个定义
+
+```c++
+int Layer::forward(const std::vector<Mat>& bottom_blobs, std::vector<Mat>& top_blobs, const Option& opt) const
+```
+
+和
+
+```c++
+int Layer::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+```
+
+所以即使是两输入一输出，也得用第一种的重载
+
+并在forward中写
+
+```c++
+Mat& top_blob = top_blobs[0];
+```
+
+来只使用一个top做输出
+
+**2. 规定**filter
+
+在forward头部加入
+
+```c++
+Mat weight_data(9, bottom_blob.elemsize, opt.blob_allocator);
+float* wpt = weight_data.channel(0);
+wpt[0] = 1;wpt[1] = 0;wpt[2] = 0;wpt[3] = 0;wpt[4] = 1;wpt[5] = 0;wpt[6] = 0;wpt[7] = 0;wpt[8] = 1;
+```
+
+**3. 逆卷积** 转置卷积 反卷积
+
+tensorflow 的tf.nn.conv2d_transpose 功能全等于一个扩展边界后 上采样插值（插零）然后进行卷积
+
+在inpaint构建网络脚本中 deconv使用了func=tf.image.resize_nearest_neighbor来进行插值 和tf.nn.conv2d_transpose有所区别
 
 
 
+### 7.7 Exc 自定义ncnn层
+
+输入： dim=3的ncnn::Mat    5440 5440 1
+
+参数： 0 = type
+
+输出： dim=3的ncnn::Mat    5440 5440 1 
+
+如果type为0 则将5440 5440 1 => [64 85 64 85] (1D mat) => transpose（1032）=> [85 64 85 64] (1D mat) => 5440 5440 1 输出
+
+如果type为1 则将5440 5440 1 => [85 64 85 64] (1D mat) => transpose（1032）=> [64 85 64 85] (1D mat) => 5440 5440 1 输出
+
+```c++
+int Exc::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+{
+    bool debugflag = false;
+
+    int w = bottom_blob.w;
+    int h = bottom_blob.h;
+    // std::cout<<"blob w: "<<w<<" bolb h: "<<h<<std::endl;
+    size_t elemsize = bottom_blob.elemsize;
+
+    const float* ptr = bottom_blob.channel(0);
+
+    top_blob.create(w, h, 1, elemsize, opt.blob_allocator);
+    if (top_blob.empty())
+        return -100;
+    float* outptr = top_blob.channel(0);
+
+    Mat flattenbottom(w*h, bottom_blob.elemsize, opt.blob_allocator);
+    float* fptr = flattenbottom.channel(0);
+    
+    // step 1: save 5440 5440 1 to 5440*5440 (1-D mat flattenbottom)
+    int index = 0;
+    for(int i=0;i<bottom_blob.h;i++){
+        for(int j=0;j<bottom_blob.w;j++){
+            fptr[index++] = ptr[j];
+        } 
+        ptr+=bottom_blob.w;
+    }
+
+    // step 2:  teanspose  (1032)
+    int shape[4];
+    if(exc_type == 0){
+        shape[0] = 64; shape[1] = 85; shape[2] = 64; shape[3] = 85; 
+    }else if(exc_type == 1){
+        shape[0] = 85; shape[1] = 64; shape[2] = 85; shape[3] = 64; 
+    }
+    int shift[4] = {shape[1]*shape[2]*shape[3],shape[2]*shape[3],shape[3],1};
+    int t[4] = {1,0,3,2};               // transpose tabel
+
+    index = 0;
+    for(int i=0;i<shape[t[0]];i++){
+        for(int j=0;j<shape[t[1]];j++){
+            for(int m=0;m<shape[t[2]];m++){
+                for(int n=0;n<shape[t[3]];n++){
+                    outptr[index++] = fptr[i*shift[t[0]] + j*shift[t[1]] + m*shift[t[2]] + n*shift[t[3]]];
+                }
+            }
+        }
+    }
+
+    if(debugflag) std::cout<<"top_blob w: "<<top_blob.w<<" top_blob h: "<<top_blob.h<<" top_blob c: "<<top_blob.c<<std::endl;
+
+    return 0;
+}
+```
 
 
 
-
-
-
+### 7.8 Reducemean 自定义ncnn层
 
 
 
